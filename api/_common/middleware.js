@@ -39,10 +39,14 @@ const timeoutErrorMsg =
 
 // A middleware function used by all API routes on all platforms
 const commonMiddleware = (handler) => {
-  // Create a timeout promise, to throw an error if a request takes too long
-  const createTimeoutPromise = (timeoutMs) => {
+  // Create a timeout promise, to throw an error if a request takes too long.
+  // Aborts the given AbortController when the timeout wins the race, so
+  // cooperating handlers (eg. screenshot.js) can cancel in-flight work
+  // instead of leaving it to run to completion in the background.
+  const createTimeoutPromise = (timeoutMs, abortController) => {
     return new Promise((_, reject) => {
       setTimeout(() => {
+        abortController.abort();
         reject(new Error(`Request timed-out after ${timeoutMs} ms`));
       }, timeoutMs);
     });
@@ -62,11 +66,20 @@ const commonMiddleware = (handler) => {
       return response.status(500).json({ error: 'No URL specified' });
     }
 
+    const abortController = new AbortController();
     try {
       const url = normalizeUrl(rawUrl);
-      const result = await Promise.race([handler(url, request), createTimeoutPromise(TIMEOUT)]);
+      const result = await Promise.race([
+        handler(url, request, abortController.signal),
+        createTimeoutPromise(TIMEOUT, abortController),
+      ]);
       response.status(200).json(typeof result === 'object' ? result : JSON.parse(result));
     } catch (error) {
+      if (error.statusCode === 429) {
+        if (error.retryAfter) response.setHeader('Retry-After', String(error.retryAfter));
+        response.status(429).json({ error: error.message });
+        return;
+      }
       const isTimeout = error.message.includes('timed-out') || response.statusCode === 504;
       const message = isTimeout ? `${error.message}\n\n${timeoutErrorMsg}` : error.message;
       response.status(isTimeout ? 408 : 500).json({ error: message });
@@ -87,11 +100,12 @@ const commonMiddleware = (handler) => {
       return { statusCode: 500, body: JSON.stringify({ error: 'No URL specified' }), headers };
     }
 
+    const abortController = new AbortController();
     try {
       const url = normalizeUrl(rawUrl);
       const result = await Promise.race([
-        handler(url, event, context),
-        createTimeoutPromise(TIMEOUT),
+        handler(url, event, context, abortController.signal),
+        createTimeoutPromise(TIMEOUT, abortController),
       ]);
       return {
         statusCode: 200,
@@ -99,6 +113,15 @@ const commonMiddleware = (handler) => {
         headers,
       };
     } catch (error) {
+      if (error.statusCode === 429) {
+        return {
+          statusCode: 429,
+          body: JSON.stringify({ error: error.message }),
+          headers: error.retryAfter
+            ? { ...headers, 'Retry-After': String(error.retryAfter) }
+            : headers,
+        };
+      }
       return { statusCode: 500, body: JSON.stringify({ error: error.message }), headers };
     }
   };
