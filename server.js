@@ -78,6 +78,23 @@ if (process.env.API_ENABLE_RATE_LIMIT === 'true') {
   app.use(API_DIR, limiters);
 }
 
+// Health check endpoint, exempt from the rate limiters above (which only
+// mount on /api). Platform health probes fire frequently enough to exhaust
+// the per-IP limits, which gets the instance killed as unhealthy. Runs the
+// real DNS check handler so a wedged API layer still fails the probe.
+const HEALTHZ_TARGET = process.env.HEALTHZ_TARGET_URL || 'example.com';
+app.get('/healthz', async (req, res) => {
+  const dnsHandler = handlers[`${API_DIR}/dns`];
+  if (!dnsHandler) {
+    return res.status(503).json({ status: 'starting' });
+  }
+  try {
+    await dnsHandler({ ...req, query: { url: HEALTHZ_TARGET } }, res);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Read and register each API function as an Express routes
 fs.readdirSync(dirPath, { withFileTypes: true })
   .filter((dirent) => dirent.isFile() && dirent.name.endsWith('.js'))
