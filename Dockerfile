@@ -1,8 +1,13 @@
 # Specify the Node.js version to use
 ARG NODE_VERSION=22
 
-# Specify the Debian version to use, the default is "bullseye"
-ARG DEBIAN_VERSION=bullseye
+# Specify the Debian version to use. Pinned to a maintained release
+# ("bookworm", Debian 12) rather than EOL-bound "bullseye" (Debian 11):
+# as bullseye ages out of the stable security-mirror rotation, point
+# releases get superseded and their .debs disappear from
+# deb.debian.org/debian-security, producing intermittent 404s on
+# unrelated transitive deps (e.g. libcap2) during `apt-get install`.
+ARG DEBIAN_VERSION=bookworm
 
 # Use Node.js Docker image as the base image, with specific Node and Debian versions
 FROM node:${NODE_VERSION}-${DEBIAN_VERSION} AS build
@@ -10,14 +15,12 @@ FROM node:${NODE_VERSION}-${DEBIAN_VERSION} AS build
 # Set the container's default shell to Bash and enable some options
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-# Install Chromium browser and Download and verify Google Chrome's signing key
-RUN apt-get update -qq --fix-missing && \
-    apt-get -qqy install --allow-unauthenticated gnupg wget && \
-    wget --quiet --output-document=- https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /etc/apt/trusted.gpg.d/google-archive.gpg && \
-    echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list && \
-    apt-get update -qq && \
-    apt-get -qqy --no-install-recommends install chromium traceroute python make g++ && \
-    rm -rf /var/lib/apt/lists/* 
+# Install Chromium and native build tooling needed by some yarn deps.
+# apt-get update + install run in the same layer so the package index
+# used to resolve versions is never stale relative to what gets installed.
+RUN apt-get update -qq && \
+    apt-get -qqy --no-install-recommends install chromium traceroute python3 make g++ && \
+    rm -rf /var/lib/apt/lists/*
 
 # Run the Chromium browser's version command and redirect its output to the /etc/chromium-version file
 RUN /usr/bin/chromium --no-sandbox --version > /etc/chromium-version
@@ -29,8 +32,7 @@ WORKDIR /app
 COPY package.json yarn.lock ./
 
 # Run yarn install to install dependencies and clear yarn cache
-RUN apt-get update && \
-    yarn install --frozen-lockfile --network-timeout 100000 && \
+RUN yarn install --frozen-lockfile --network-timeout 100000 && \
     rm -rf /app/node_modules/.cache
 
 # Copy all files to working directory
@@ -47,8 +49,8 @@ WORKDIR /app
 COPY package.json yarn.lock ./
 COPY --from=build /app .
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends chromium traceroute && \
+RUN apt-get update -qq && \
+    apt-get -qqy --no-install-recommends install chromium traceroute && \
     chmod 755 /usr/bin/chromium && \
     rm -rf /var/lib/apt/lists/* /app/node_modules/.cache
 
